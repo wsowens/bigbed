@@ -1,8 +1,10 @@
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::io::BufReader;
+use std::io::SeekFrom;
 
 static BIGBED_SIG: [u8; 4] = [0x87, 0x89, 0xF2, 0xEB];
+static BPT_SIG: [u8; 4] = [0x78, 0xCA, 0x8C, 0x91];
 
 trait ByteReader: std::io::Read {
     fn read_u64(&mut self, big_endian: bool) -> u64 {
@@ -55,6 +57,37 @@ struct ZoomLevel {
 }
 
 #[derive(Debug)]
+struct BPlusTree { 
+    blockSize: u32,
+    keySize: u32,
+    valSize: u32,
+    itemCount: u64,
+}
+
+impl BPlusTree {
+    fn with_reader(reader: &mut File) -> Result<BPlusTree, &'static str> {
+        let mut buff = [0; 4];
+        reader.read_exact(&mut buff);
+        let big_endian =
+            if buff == BPT_SIG {
+                true
+            } else if buff.iter().eq(BPT_SIG.iter().rev()) {
+                false
+            } else {
+                return Err("This is not a BPT file!");
+            };
+        let blockSize = reader.read_u32(big_endian);
+        let keySize = reader.read_u32(big_endian);
+        let valSize = reader.read_u32(big_endian);
+        let itemCount = reader.read_u64(big_endian);
+
+        // skip over the reserved region and get the root offset
+        let root_offset = reader.seek(SeekFrom::Current(8));
+        Ok(BPlusTree{blockSize, keySize, valSize, itemCount})
+    }
+}
+
+#[derive(Debug)]
 struct BigBed {
     reader: File,
     pub big_endian: bool,
@@ -70,11 +103,14 @@ struct BigBed {
     pub uncompress_buf_size: u32,
     pub extension_offset: u64,
     pub level_list: Vec<ZoomLevel>,
+    pub extension_size: Option<u16>,
+    pub extra_index_count: Option<u16>,
+    pub extra_index_list_offset: Option<u64>,
+    chrom_bpt: BPlusTree,
+
 }
 
-
 impl BigBed {
-
     fn from_file(filename: &str) -> Result<BigBed, &'static str> {
         let mut reader: File = File::open(filename).unwrap();
         //let mut reader = BufReader::new(file);
@@ -85,8 +121,8 @@ impl BigBed {
                 true
             } else if buff.iter().eq(BIGBED_SIG.iter().rev()) {
                 false
-            } else {r
-                return Err("This is not a bigbed file!")
+            } else {
+                return Err("This is not a bigbed file!");
             };
         let version = reader.read_u16(big_endian);
         let zoom_levels = reader.read_u16(big_endian);
@@ -110,7 +146,30 @@ impl BigBed {
             })
         }
 
-        Ok(BigBed{reader, big_endian, version, zoom_levels, chrom_tree_offset, unzoomed_data_offset, unzoomed_index_offset, field_count, defined_field_count, as_offset, total_summary_offset, uncompress_buf_size, extension_offset, level_list})
+        let mut extension_size = None;
+        let mut extra_index_count = None;
+        let mut extra_index_list_offset = None;
+
+        if extension_offset != 0 {
+            // move to extension
+            reader.seek(SeekFrom::Start(extension_offset));
+            extension_size = Some(reader.read_u16(big_endian));
+            extra_index_count = Some(reader.read_u16(big_endian));
+            extra_index_list_offset = Some(reader.read_u64(big_endian));
+        }
+
+        //move to the B+ tree file region
+        reader.seek(SeekFrom::Start(chrom_tree_offset));
+        let chrom_bpt = BPlusTree::with_reader(&mut reader)?;
+
+        Ok(BigBed{
+            reader, big_endian, version, zoom_levels, chrom_tree_offset, 
+            unzoomed_data_offset, unzoomed_index_offset, field_count,
+            defined_field_count, as_offset, total_summary_offset, 
+            uncompress_buf_size, extension_offset, level_list,
+            extension_size, extra_index_count, extra_index_list_offset,
+            chrom_bpt
+        })
     }
 }
 

@@ -3,6 +3,7 @@ import sys
 import struct
 from collections import namedtuple
 from enum import Enum
+import zlib
 
 BIGBEDSIG = b'\x87\x89\xF2\xEB'
 BPTSIG = b'\x78\xCA\x8C\x91'
@@ -457,14 +458,18 @@ class BigBed(Handle):
             mergedBuf = self.read_bytes(mergedSize)
             blockBuf = mergedBuf
 
+
+
             # iterate over the indices until you reach the gap
             blockPt = 0
             for index in range(afterGap):
                 # if we have any uncompression to do:
                 if uncompressBuf:
-                    vprint("reading compressed data")
-                    exit(-1)
-                # otherwise prepare the buffer as normal
+                    # we do it this way so that we can keep the blocks intact!
+                    self.vprint("reading compressed data")
+                    buff = zlib.decompress(mergedBuf[blockPt:blocks[index].size])
+                    blockEnd = blockPt + len(buff)
+                ## otherwise prepare the buffer as normal
                 else:
                     buff = mergedBuf
                     blockEnd = blockPt + blocks[index].size

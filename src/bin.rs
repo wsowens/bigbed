@@ -624,7 +624,7 @@ impl BigBed {
                             break;
                         }
                         let rest = if rest_length > 0 {
-                            Some(String::from_utf8(buff[index..rest_length].to_vec()).unwrap())
+                            Some(String::from_utf8(buff[index..rest_length+index].to_vec()).unwrap())
                         } else {
                             None
                         };

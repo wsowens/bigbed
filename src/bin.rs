@@ -80,7 +80,7 @@ struct FileOffsetSize{
     size: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Chrom{
     name: String,
     id: u32,
@@ -131,7 +131,7 @@ impl BPlusTreeFile {
 
 
     //TODO: eventually abstract the traversal function as an iterator
-    fn chrom_list(self, reader: &mut File) -> Vec<Chrom> {
+    fn chrom_list(&self, reader: &mut File) -> Vec<Chrom> {
         // move reader to the root_offset
         let mut chroms: Vec<Chrom> = Vec::new();
         let mut offsets = VecDeque::new();
@@ -205,11 +205,13 @@ impl BPlusTreeFile {
     }
 
     fn _find_internal(&self, chrom: &str, reader: &mut File) -> Result<Option<Chrom>, &'static str> {
+        eprintln!("running _find_internal {}", chrom);
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
         while let Some(offset) = offsets.pop_back() {
             // move to the offset
-            
+            reader.seek(SeekFrom::Start(offset));
+
             // read block header
             let is_leaf = reader.read_u8();
             let reserved = reader.read_u8();
@@ -220,12 +222,12 @@ impl BPlusTreeFile {
                 for _  in 0..child_count {
                     let mut keybuf: Vec<u8> = vec![0; self.key_size.try_into().unwrap()];
                     reader.read(&mut keybuf);
+                    reader.read(&mut valbuf);
                     let other_key = String::from_utf8(keybuf).unwrap();
                     if other_key == chrom {
                         if self.val_size != 8 {
                             panic!("Expected chromosome data to be 8 bytes not, {}", self.val_size)
                         }
-                        reader.read(&mut valbuf);
                         let id = if self.big_endian {
                             u32::from_be_bytes(valbuf[0..4].try_into().unwrap())
                         } else {
@@ -398,6 +400,7 @@ impl BigBed {
             chrom_bpt, unzoomed_cir: None,
         })
     }
+    
     /*
     fn overlapping_blocks(&self, index: &CIRTreeFile, chrom: Vec<u8>, 
                           start: u32, stop: u32, max_items: u32)  -> Result<Vec<FileOffsetSize>, &'static str> {
@@ -410,9 +413,8 @@ impl BigBed {
 
             }
         }
-
     }*/
-
+ 
     fn query(&mut self, start: u32, end: u32, items: u32) -> Result<Vec<BedLine>, &'static str> {
         let lines: Vec<BedLine> = Vec::new();
         // check if the unzoomed index is attached
@@ -434,6 +436,13 @@ impl BigBed {
         Ok(lines)
     }
 
+    fn chrom_list(&mut self) -> Vec<Chrom> {
+        self.chrom_bpt.chrom_list(&mut self.reader)
+    }
+
+    fn find_chrom(&mut self, chrom: &str) -> Result<Option<Chrom>, &'static str> {
+        self.chrom_bpt.find(chrom, &mut self.reader)
+    }
 }
 
 #[cfg(test)]
@@ -504,7 +513,162 @@ mod test_bb {
                     ZoomLevel{reduction_level: 39055616, reserved: 0, data_offset: 125815, index_offset: 127568},
                     ZoomLevel{reduction_level: 156222464, reserved: 0, data_offset: 133772, index_offset: 134387},
                     ZoomLevel{reduction_level: 624889856, reserved: 0, data_offset: 140591, index_offset: 141086}
-        ])
+        ]);
+    }
+
+    #[test]
+    fn test_chrom_list() {
+        let mut bb = BigBed::from_file("test/bigbeds/one.bb").unwrap();
+        // should only include the chromosomes mapped in the file
+        assert_eq!(bb.chrom_list(), vec![Chrom{name: String::from("chr7"), id: 0, size: 159345973}]);
+        // same list should be generated a second time
+        assert_eq!(bb.chrom_list(), vec![Chrom{name: String::from("chr7"), id: 0, size: 159345973}]);
+        // should include all chromosomes
+        let mut bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        assert_eq!(bb.chrom_list(), vec![
+            Chrom{name: String::from("chr1\0"), id: 0, size: 248956422},
+            Chrom{name: String::from("chr10"), id: 1, size: 133797422},
+            Chrom{name: String::from("chr11"), id: 2, size: 135086622},
+            Chrom{name: String::from("chr12"), id: 3, size: 133275309},
+            Chrom{name: String::from("chr13"), id: 4, size: 114364328},
+            Chrom{name: String::from("chr14"), id: 5, size: 107043718},
+            Chrom{name: String::from("chr15"), id: 6, size: 101991189},
+            Chrom{name: String::from("chr16"), id: 7, size: 90338345},
+            Chrom{name: String::from("chr17"), id: 8, size: 83257441},
+            Chrom{name: String::from("chr18"), id: 9, size: 80373285},
+            Chrom{name: String::from("chr19"), id: 10, size: 58617616},
+            Chrom{name: String::from("chr2\0"), id: 11, size: 242193529},
+            Chrom{name: String::from("chr20"), id: 12, size: 64444167},
+            Chrom{name: String::from("chr21"), id: 13, size: 46709983},
+            Chrom{name: String::from("chr22"), id: 14, size: 50818468},
+            Chrom{name: String::from("chr3\0"), id: 15, size: 198295559},
+            Chrom{name: String::from("chr4\0"), id: 16, size: 190214555},
+            Chrom{name: String::from("chr5\0"), id: 17, size: 181538259},
+            Chrom{name: String::from("chr6\0"), id: 18, size: 170805979},
+            Chrom{name: String::from("chr7\0"), id: 19, size: 159345973},
+            Chrom{name: String::from("chr8\0"), id: 20, size: 145138636},
+            Chrom{name: String::from("chr9\0"), id: 21, size: 138394717},
+            Chrom{name: String::from("chrX\0"), id: 22, size: 156040895},
+            Chrom{name: String::from("chrY\0"), id: 23, size: 57227415}
+        ]);
+        let mut bb = BigBed::from_file("test/bigbeds/tair10-nochr.bb").unwrap();
+        assert_eq!(bb.chrom_list(), vec![
+            Chrom{name: String::from("1"), id: 0, size: 30427671},
+            Chrom{name: String::from("2"), id: 1, size: 19698289},
+            Chrom{name: String::from("3"), id: 2, size: 23459830},
+            Chrom{name: String::from("4"), id: 3, size: 18585056},
+            Chrom{name: String::from("5"), id: 4, size: 26975502},
+            Chrom{name: String::from("C"), id: 5, size: 154478},
+            Chrom{name: String::from("M"), id: 6, size: 366924}
+        ]);
+        let mut bb = BigBed::from_file("test/bigbeds/tair10.bb").unwrap();
+        assert_eq!(bb.chrom_list(), vec![
+            Chrom{name: String::from("Chr1"), id: 0, size: 30427671},
+            Chrom{name: String::from("Chr2"), id: 1, size: 19698289},
+            Chrom{name: String::from("Chr3"), id: 2, size: 23459830},
+            Chrom{name: String::from("Chr4"), id: 3, size: 18585056},
+            Chrom{name: String::from("Chr5"), id: 4, size: 26975502},
+            Chrom{name: String::from("ChrC"), id: 5, size: 154478},
+            Chrom{name: String::from("ChrM"), id: 6, size: 366924}
+        ]);
+        // testing with an extremely large chrom.sizes file:
+        let mut bb = BigBed::from_file("test/bigbeds/mm10.bb").unwrap();
+        assert_eq!(bb.chrom_list(), vec![
+            Chrom{name: String::from("chr1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 0, size: 195471971},
+            Chrom{name: String::from("chr10\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 1, size: 130694993},
+            Chrom{name: String::from("chr11\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 2, size: 122082543},
+            Chrom{name: String::from("chr12\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 3, size: 120129022},
+            Chrom{name: String::from("chr13\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 4, size: 120421639},
+            Chrom{name: String::from("chr14\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 5, size: 124902244},
+            Chrom{name: String::from("chr15\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 6, size: 104043685},
+            Chrom{name: String::from("chr16\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 7, size: 98207768},
+            Chrom{name: String::from("chr17\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 8, size: 94987271},
+            Chrom{name: String::from("chr18\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 9, size: 90702639},
+            Chrom{name: String::from("chr19\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 10, size: 61431566},
+            Chrom{name: String::from("chr1_GL456210_random"), id: 11, size: 169725},
+            Chrom{name: String::from("chr1_GL456211_random"), id: 12, size: 241735},
+            Chrom{name: String::from("chr1_GL456212_random"), id: 13, size: 153618},
+            Chrom{name: String::from("chr1_GL456213_random"), id: 14, size: 39340},
+            Chrom{name: String::from("chr1_GL456221_random"), id: 15, size: 206961},
+            Chrom{name: String::from("chr2\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 16, size: 182113224},
+            Chrom{name: String::from("chr3\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 17, size: 160039680},
+            Chrom{name: String::from("chr4\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 18, size: 156508116},
+            Chrom{name: String::from("chr4_GL456216_random"), id: 19, size: 66673},
+            Chrom{name: String::from("chr4_GL456350_random"), id: 20, size: 227966},
+            Chrom{name: String::from("chr4_JH584292_random"), id: 21, size: 14945},
+            Chrom{name: String::from("chr4_JH584293_random"), id: 22, size: 207968},
+            Chrom{name: String::from("chr4_JH584294_random"), id: 23, size: 191905},
+            Chrom{name: String::from("chr4_JH584295_random"), id: 24, size: 1976},
+            Chrom{name: String::from("chr5\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 25, size: 151834684},
+            Chrom{name: String::from("chr5_GL456354_random"), id: 26, size: 195993},
+            Chrom{name: String::from("chr5_JH584296_random"), id: 27, size: 199368},
+            Chrom{name: String::from("chr5_JH584297_random"), id: 28, size: 205776},
+            Chrom{name: String::from("chr5_JH584298_random"), id: 29, size: 184189},
+            Chrom{name: String::from("chr5_JH584299_random"), id: 30, size: 953012},
+            Chrom{name: String::from("chr6\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 31, size: 149736546},
+            Chrom{name: String::from("chr7\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 32, size: 145441459},
+            Chrom{name: String::from("chr7_GL456219_random"), id: 33, size: 175968},
+            Chrom{name: String::from("chr8\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 34, size: 129401213},
+            Chrom{name: String::from("chr9\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 35, size: 124595110},
+            Chrom{name: String::from("chrM\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 36, size: 16299},
+            Chrom{name: String::from("chrUn_GL456239\0\0\0\0\0\0"), id: 37, size: 40056},
+            Chrom{name: String::from("chrUn_GL456359\0\0\0\0\0\0"), id: 38, size: 22974},
+            Chrom{name: String::from("chrUn_GL456360\0\0\0\0\0\0"), id: 39, size: 31704},
+            Chrom{name: String::from("chrUn_GL456366\0\0\0\0\0\0"), id: 40, size: 47073},
+            Chrom{name: String::from("chrUn_GL456367\0\0\0\0\0\0"), id: 41, size: 42057},
+            Chrom{name: String::from("chrUn_GL456368\0\0\0\0\0\0"), id: 42, size: 20208},
+            Chrom{name: String::from("chrUn_GL456370\0\0\0\0\0\0"), id: 43, size: 26764},
+            Chrom{name: String::from("chrUn_GL456372\0\0\0\0\0\0"), id: 44, size: 28664},
+            Chrom{name: String::from("chrUn_GL456378\0\0\0\0\0\0"), id: 45, size: 31602},
+            Chrom{name: String::from("chrUn_GL456379\0\0\0\0\0\0"), id: 46, size: 72385},
+            Chrom{name: String::from("chrUn_GL456381\0\0\0\0\0\0"), id: 47, size: 25871},
+            Chrom{name: String::from("chrUn_GL456382\0\0\0\0\0\0"), id: 48, size: 23158},
+            Chrom{name: String::from("chrUn_GL456383\0\0\0\0\0\0"), id: 49, size: 38659},
+            Chrom{name: String::from("chrUn_GL456385\0\0\0\0\0\0"), id: 50, size: 35240},
+            Chrom{name: String::from("chrUn_GL456387\0\0\0\0\0\0"), id: 51, size: 24685},
+            Chrom{name: String::from("chrUn_GL456389\0\0\0\0\0\0"), id: 52, size: 28772},
+            Chrom{name: String::from("chrUn_GL456390\0\0\0\0\0\0"), id: 53, size: 24668},
+            Chrom{name: String::from("chrUn_GL456392\0\0\0\0\0\0"), id: 54, size: 23629},
+            Chrom{name: String::from("chrUn_GL456393\0\0\0\0\0\0"), id: 55, size: 55711},
+            Chrom{name: String::from("chrUn_GL456394\0\0\0\0\0\0"), id: 56, size: 24323},
+            Chrom{name: String::from("chrUn_GL456396\0\0\0\0\0\0"), id: 57, size: 21240},
+            Chrom{name: String::from("chrUn_JH584304\0\0\0\0\0\0"), id: 58, size: 114452},
+            Chrom{name: String::from("chrX\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 59, size: 171031299},
+            Chrom{name: String::from("chrX_GL456233_random"), id: 60, size: 336933},
+            Chrom{name: String::from("chrY\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 61, size: 91744698},
+            Chrom{name: String::from("chrY_JH584300_random"), id: 62, size: 182347},
+            Chrom{name: String::from("chrY_JH584301_random"), id: 63, size: 259875},
+            Chrom{name: String::from("chrY_JH584302_random"), id: 64, size: 155838},
+            Chrom{name: String::from("chrY_JH584303_random"), id: 65, size: 158099}
+        ]);
+    }
+    
+    #[test]
+    fn test_find_chrom_one() {
+         let mut bb = BigBed::from_file("test/bigbeds/one.bb").unwrap();
+         assert_eq!(bb.find_chrom("chr1").unwrap(), None);
+         assert_eq!(bb.find_chrom("chr7").unwrap(), Some(Chrom{name: String::from("chr7"), id: 0, size: 159345973}));
+         // does it work again?
+         assert_eq!(bb.find_chrom("chr7").unwrap(), Some(Chrom{name: String::from("chr7"), id: 0, size: 159345973}));
+         assert_eq!(bb.find_chrom("chr").unwrap(), None);
+         // key too long
+         assert_eq!(bb.find_chrom("chr79"), Err("Key too long."));
+         // should be case-sensitive
+         assert_eq!(bb.find_chrom("cHr7").unwrap(), None);
+         // near-matches don't count
+         assert_eq!(bb.find_chrom("xhr7").unwrap(), None);
+    }
+
+    #[test]
+    fn test_find_chrom_long() {
+        let mut bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        assert_eq!(bb.find_chrom("chr2\0").unwrap(), Some(Chrom{name: String::from("chr2\0"), id: 11, size: 242193529}));
+        // should work without padding
+        assert_eq!(bb.find_chrom("chr2").unwrap(), Some(Chrom{name: String::from("chr2\0"), id: 11, size: 242193529}));
+        // cannot omit the 'chr'
+        assert_eq!(bb.find_chrom("2").unwrap(), None);
+        // still should have key too long errors
+        assert_eq!(bb.find_chrom("chr2xx"), Err("Key too long."));
     }
 }
 
@@ -516,8 +680,8 @@ fn main() {
     }
     match BigBed::from_file(&args[1]) {
         Ok(mut bb) => {
-            println!("{:#?}", bb);
-            println!("{:#?}", bb.chrom_bpt.chrom_list(&mut bb.reader));
+            //println!("{:#?}", bb);
+            println!("{:#?}", bb.find_chrom("chr7"));
         }
         Err(msg) => {
             eprintln!("{}", msg);

@@ -67,7 +67,7 @@ impl<T> Propagate<T> for std::io::Result<T> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct ZoomLevel {
     reduction_level: u32,
     reserved: u32,
@@ -398,6 +398,21 @@ impl BigBed {
             chrom_bpt, unzoomed_cir: None,
         })
     }
+    /*
+    fn overlapping_blocks(&self, index: &CIRTreeFile, chrom: Vec<u8>, 
+                          start: u32, stop: u32, max_items: u32)  -> Result<Vec<FileOffsetSize>, &'static str> {
+        // find the chrom data in the B+ tree
+        chrom_data = match self.chrom_bpt.find(&chrom) {
+            None => {
+                // try without the 'chr'
+
+            } Some(chrom) => {
+
+            }
+        }
+
+    }*/
+
     fn query(&mut self, start: u32, end: u32, items: u32) -> Result<Vec<BedLine>, &'static str> {
         let lines: Vec<BedLine> = Vec::new();
         // check if the unzoomed index is attached
@@ -443,6 +458,53 @@ mod test_bb {
     #[test]
     fn from_file_onebed() {
         let bb = BigBed::from_file("test/bigbeds/one.bb").unwrap();
+        assert_eq!(bb.as_offset, 304);
+        assert_eq!(bb.chrom_tree_offset, 628);
+        assert_eq!(bb.defined_field_count, 3);
+        assert_eq!(bb.extension_offset, 564);
+        assert_eq!(bb.extension_size, Some(64));
+        assert_eq!(bb.extra_index_count, Some(0));
+        assert_eq!(bb.extra_index_list_offset, Some(0));
+        assert_eq!(bb.field_count, 3);
+        assert_eq!(bb.big_endian, false);
+        assert_eq!(bb.total_summary_offset, 524);
+        assert_eq!(bb.uncompress_buf_size, 16384);
+        assert!(bb.unzoomed_cir.is_none());
+        assert_eq!(bb.unzoomed_data_offset, 676);
+        assert_eq!(bb.unzoomed_index_offset, 700);
+        assert_eq!(bb.version, 4);
+        assert_eq!(bb.zoom_levels, 1);
+        assert_eq!(bb.level_list, vec![
+            ZoomLevel{reduction_level: 107485656, reserved: 0, data_offset: 6904, index_offset: 6936}
+        ])
+    }
+
+    #[test]
+    fn from_file_longbed() {
+        let bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        assert_eq!(bb.as_offset, 304);
+        assert_eq!(bb.chrom_tree_offset, 628);
+        assert_eq!(bb.defined_field_count, 3);
+        assert_eq!(bb.extension_offset, 564);
+        assert_eq!(bb.extension_size, Some(64));
+        assert_eq!(bb.extra_index_count, Some(0));
+        assert_eq!(bb.extra_index_list_offset, Some(0));
+        assert_eq!(bb.field_count, 3);
+        assert_eq!(bb.big_endian, false);
+        assert_eq!(bb.total_summary_offset, 524);
+        assert_eq!(bb.uncompress_buf_size, 16384);
+        assert!(bb.unzoomed_cir.is_none());
+        assert_eq!(bb.unzoomed_data_offset, 976);
+        assert_eq!(bb.unzoomed_index_offset, 80369);
+        assert_eq!(bb.version, 4);
+        assert_eq!(bb.zoom_levels, 5);
+        assert_eq!(bb.level_list, vec![
+                    ZoomLevel{reduction_level: 2440976, reserved: 0, data_offset: 86757, index_offset: 106847},
+                    ZoomLevel{reduction_level: 9763904, reserved: 0, data_offset: 113067, index_offset: 119611},
+                    ZoomLevel{reduction_level: 39055616, reserved: 0, data_offset: 125815, index_offset: 127568},
+                    ZoomLevel{reduction_level: 156222464, reserved: 0, data_offset: 133772, index_offset: 134387},
+                    ZoomLevel{reduction_level: 624889856, reserved: 0, data_offset: 140591, index_offset: 141086}
+        ])
     }
 }
 

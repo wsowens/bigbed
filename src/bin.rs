@@ -4,6 +4,10 @@ use std::io::SeekFrom;
 use std::collections::VecDeque;
 use std::convert::TryInto;
 
+extern crate flate2;
+
+use flate2::{Decompress, FlushDecompress};
+
 static BIGBED_SIG: [u8; 4] = [0x87, 0x89, 0xF2, 0xEB];
 static BPT_SIG: [u8; 4] = [0x78, 0xCA, 0x8C, 0x91];
 static CIRTREE_SIG: [u8; 4] = [0x24, 0x68, 0xAC, 0xE0];
@@ -101,9 +105,8 @@ fn strip_null(inp: &str) -> &str {
             break
         }
     }
-    let mut end = inp.len();
     for (index, byte) in inp.bytes().enumerate().skip(start) {
-        if (byte == 0) {
+        if byte == 0 {
             return &inp[start..index]
         }
     }
@@ -535,6 +538,13 @@ impl BigBed {
         let padded_end = end + 1;
         let blocks = self.overlapping_blocks(chrom_id, padded_start, padded_end)?;
         
+        let mut decompressor = None;
+        let mut decom_buff = None;
+        if self.uncompress_buf_size > 0 {
+            decompressor = Some(Decompress::new(true));
+            decom_buff = Some(vec![0u8; self.uncompress_buf_size as usize]);
+        }
+
         let mut remaining = &blocks[..];
         while remaining.len() > 0 {
             // iterate through the list of blocks, get a slice of contiguous blocks
@@ -556,11 +566,33 @@ impl BigBed {
             let mut index: usize = 0;
             // for each block in the merged group
             for block in before_gap {
-                let (buff, block_end) = if self.uncompress_buf_size > 0 {
-                    panic!("COMPRESSED DATA RECEIVED")
-                } else {
-                    (&merged_buff, index + block.size as usize)
-                };
+                let mut buff = &merged_buff;
+                let mut block_end = index + block.size as usize;
+                if self.uncompress_buf_size > 0 {
+                    let debuff =  decom_buff.as_mut().unwrap();
+                    let decomp =   decompressor.as_mut().unwrap();
+                    //eprintln!("before {:?}", debuff);
+                    let result = decomp.decompress(&merged_buff[index..(block.size as usize)], debuff, FlushDecompress::Finish);
+                    match result {
+                        Err(e) => {
+                            eprintln!("{}",e);
+                            return Err("Decompression error!");
+                        }
+                        Ok(status) => {
+                            match status {
+                                flate2::Status::Ok | flate2::Status::StreamEnd => {}
+                                _ => {
+                                    eprintln!("{:?}", status);
+                                    return Err("Decompression error!");
+                                }
+                            }   
+                        }
+                    }
+                    //eprintln!("after {:?}", debuff);
+                    block_end = index + (decomp.total_out() as usize);
+                    decomp.reset(true);
+                    buff = &*debuff;
+                }
                 // iterate over the individual bytes in this block
                 while index < block_end {
                     // read in chrom_id
@@ -601,7 +633,7 @@ impl BigBed {
                             start: s,
                             end: e,
                             rest
-                        })
+                        });
                         // get the rest of the data if it is present
                         // add the BedLine to the list
                     }

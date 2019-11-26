@@ -6,6 +6,7 @@ edition = "2018"
 license = "GPL-3.0"
 
 [dependencies]
+flate2 = "1.0.13"
 
 [lib]
 name = "bigbed"

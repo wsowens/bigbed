@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, BufReader, BufRead, Write, BufWriter};
 use std::io::SeekFrom;
 use std::collections::VecDeque;
 use std::convert::TryInto;
@@ -53,6 +53,7 @@ trait ByteReader: std::io::Read {
 }
 
 impl ByteReader for File {}
+impl ByteReader for BufReader<File> {}
 
 // a trait to ease with error propagation
 trait Propagate<T> {
@@ -139,7 +140,7 @@ struct BPlusTreeFile {
 }
 
 impl BPlusTreeFile {
-    fn with_reader(reader: &mut File) -> Result<BPlusTreeFile, &'static str> {
+    fn with_reader(reader: &mut BufReader<File>) -> Result<BPlusTreeFile, &'static str> {
         // check the signature first
         let mut buff = [0; 4];
         reader.read_exact(&mut buff).propagate()?;
@@ -165,7 +166,7 @@ impl BPlusTreeFile {
 
 
     //TODO: eventually abstract the traversal function as an iterator
-    fn chrom_list(&self, reader: &mut File) -> Vec<Chrom> {
+    fn chrom_list(&self, reader: &mut BufReader<File>) -> Vec<Chrom> {
         // move reader to the root_offset
         let mut chroms: Vec<Chrom> = Vec::new();
         let mut offsets = VecDeque::new();
@@ -217,7 +218,7 @@ impl BPlusTreeFile {
     }
 
     // TODO: abstract this method
-    fn find(&self, chrom: &str, reader: &mut File) -> Result<Option<Chrom>, &'static str> {
+    fn find(&self, chrom: &str, reader: &mut BufReader<File>) -> Result<Option<Chrom>, &'static str> {
         if chrom.len() > self.key_size.try_into().unwrap() {
             return Err("Key too long.")
         }
@@ -237,7 +238,7 @@ impl BPlusTreeFile {
         }
     }
 
-    fn _find_internal(&self, chrom: &str, reader: &mut File) -> Result<Option<Chrom>, &'static str> {
+    fn _find_internal(&self, chrom: &str, reader: &mut BufReader<File>) -> Result<Option<Chrom>, &'static str> {
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
         while let Some(offset) = offsets.pop_back() {
@@ -319,7 +320,7 @@ fn cir_overlaps(q_chrom: u32, q_start: u32, q_end: u32,
 }
 
 impl CIRTreeFile {
-    fn with_reader(reader: &mut File) -> Result<CIRTreeFile, &'static str> {
+    fn with_reader(reader: &mut BufReader<File>) -> Result<CIRTreeFile, &'static str> {
         // check the signature first
         let mut buff = [0; 4];
         reader.read_exact(&mut buff).propagate()?;
@@ -359,7 +360,7 @@ impl CIRTreeFile {
         })
     }
 
-    fn find_blocks(&self, chrom_id: u32, start: u32, end: u32, reader: &mut File) -> Result<Vec<FileOffsetSize>,&'static str> {
+    fn find_blocks(&self, chrom_id: u32, start: u32, end: u32, reader: &mut BufReader<File>) -> Result<Vec<FileOffsetSize>,&'static str> {
         let mut blocks = Vec::<FileOffsetSize>::new();
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
@@ -412,7 +413,7 @@ impl CIRTreeFile {
 
 #[derive(Debug)]
 struct BigBed {
-    reader: File,
+    reader: BufReader<File>,
     pub big_endian: bool,
     pub version: u16,
     pub zoom_levels: u16,
@@ -435,7 +436,7 @@ struct BigBed {
 
 impl BigBed {
     fn from_file(filename: &str) -> Result<BigBed, &'static str> {
-        let mut reader = File::open(filename).propagate()?;
+        let mut reader = BufReader::new(File::open(filename).propagate()?);
         let mut buff = [0; 4];
         reader.read_exact(&mut buff).propagate()?;
         let big_endian =
@@ -528,6 +529,7 @@ impl BigBed {
         } else if let Some(chrom_data) = self.find_chrom(&chrom[3..])? {
             chrom_id = Some(chrom_data.id);
         } else {
+            eprintln!("{}", chrom);
             return Err("No data for chromosome.");
         }
         // this operation is safe, otherwise the return above will be invoked
@@ -563,16 +565,20 @@ impl BigBed {
             self.reader.seek(SeekFrom::Start(merged_offset));
             self.reader.read_exact(&mut merged_buff);
             
-            let mut index: usize = 0;
+            
             // for each block in the merged group
+            //eprintln!("{}", merged_buff.len());
+            //eprintln!("{:?}", before_gap);
             for block in before_gap {
-                let mut buff = &merged_buff;
-                let mut block_end = index + block.size as usize;
+                let mut index: usize = 0;
+                let mut block_start = (block.offset - merged_offset) as usize;
+                let mut block_end = block_start + block.size as usize;
+                let mut buff = &merged_buff[block_start..block_end];
                 if self.uncompress_buf_size > 0 {
                     let debuff =  decom_buff.as_mut().unwrap();
-                    let decomp =   decompressor.as_mut().unwrap();
-                    //eprintln!("before {:?}", debuff);
-                    let result = decomp.decompress(&merged_buff[index..(block.size as usize)], debuff, FlushDecompress::Finish);
+                    let decomp =  decompressor.as_mut().unwrap();
+                    //eprintln!("new block {} {}", block_start, block_end);
+                    let result = decomp.decompress(&buff, debuff, FlushDecompress::Finish);
                     match result {
                         Err(e) => {
                             eprintln!("{}",e);
@@ -588,8 +594,8 @@ impl BigBed {
                             }   
                         }
                     }
-                    //eprintln!("after {:?}", debuff);
-                    block_end = index + (decomp.total_out() as usize);
+                    //eprintln!("total out {:?}", decomp.total_out());
+                    block_end = (decomp.total_out() as usize);
                     decomp.reset(true);
                     buff = &*debuff;
                 }
@@ -617,27 +623,30 @@ impl BigBed {
                             break;
                         }
                     }
+                    //eprintln!("{} {} {} {}", chr, s, e, rest_length);
+                    //eprintln!("{}, {}", index, rest_length + index);
                     // check if this data is in the correct range
                     if chr == chrom_id && ( (s < end && e > start) || (s == e && (s == end || end == start) )) {
                         item_count += 1;
                         if max_items > 0 && item_count > max_items {
                             break;
                         }
+                        // get the rest of the data if it is present
                         let rest = if rest_length > 0 {
-                            Some(String::from_utf8(buff[index..rest_length+index].to_vec()).unwrap())
+                            Some(String::from_utf8(buff[index..rest_length+index].to_vec()).expect("FUCK"))
                         } else {
                             None
                         };
+                        // add the BedLine to the list
                         lines.push(BedLine{
                             chrom_id: chr,
                             start: s,
                             end: e,
                             rest
                         });
-                        // get the rest of the data if it is present
-                        // add the BedLine to the list
                     }
                     // rest_length + 1 will be at the null character
+                    //eprintln!("pastloop");
                     index += rest_length + 1;
                 }
                 // propagate the break statement
@@ -652,7 +661,7 @@ impl BigBed {
         Ok(lines)
     }
 
-    fn to_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>) {
+    fn to_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>, mut output: Option<impl Write>) {
         let item_count = 0;
         for chrom_data in self.chrom_list() {
             //TODO: check for null characters
@@ -681,12 +690,26 @@ impl BigBed {
 
             let name_to_print = strip_null(&chrom_data.name);
             let interval_list = self.query(&chrom_data.name, start, end, items_left).unwrap();
-            for bed_line in interval_list.into_iter() {
-                match bed_line.rest {
-                    None => {
-                        println!("{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end)
-                    } Some(data) => {
-                        println!("{}\t{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end, data);
+            match output.as_mut() {
+                None => {
+                    for bed_line in interval_list.into_iter() {
+                        match bed_line.rest {
+                            None => {
+                                println!("{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end)
+                            } Some(data) => {
+                                println!("{}\t{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end, data);
+                            }
+                        }
+                    }
+                } Some(output) => {
+                    for bed_line in interval_list.into_iter() {
+                        match bed_line.rest {
+                            None => {
+                                output.write(format!("{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end).as_bytes());
+                            } Some(data) => {
+                                output.write(format!("{}\t{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end, data).as_bytes());
+                            }
+                        }
                     }
                 }
             }
@@ -944,12 +967,19 @@ mod test_bb {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Error: Please provide a filename!");
+        eprintln!("Error: Please provide !");
         std::process::exit(1);
     }
     match BigBed::from_file(&args[1]) {
         Ok(mut bb) => {
-            bb.to_bed(None, None, None, None);
+            let mut output = if args.len() == 3 {
+                Some(
+                    BufWriter::new(File::create(&args[2]).unwrap())
+                )
+            } else {
+                None
+            };
+            bb.to_bed(None, None, None, None, output);
         }
         Err(msg) => {
             eprintln!("{}", msg);

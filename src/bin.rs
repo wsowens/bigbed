@@ -81,6 +81,35 @@ struct FileOffsetSize{
     size: u64,
 }
 
+fn find_file_offset_gap(block_list: &[FileOffsetSize]) -> (&[FileOffsetSize], &[FileOffsetSize]) {
+    for (index, block) in block_list.iter().enumerate() {
+        let next = index + 1;
+        // find the first gap
+        if next < block_list.len()  && block_list[next].offset != block.offset + block.size {
+            return (&block_list[..next], &block_list[next..])
+        }
+    }
+    (&block_list[..], &[])
+}
+
+fn strip_null(inp: &str) -> &str {
+    let mut start = 0;
+    for (index, byte) in inp.bytes().enumerate() {
+        if start == index && byte == 0 {
+            start += 1
+        } else {
+            break
+        }
+    }
+    let mut end = inp.len();
+    for (index, byte) in inp.bytes().enumerate().skip(start) {
+        if (byte == 0) {
+            return &inp[start..index]
+        }
+    }
+    &inp[start..]
+}
+
 #[derive(Debug, PartialEq)]
 struct Chrom{
     name: String,
@@ -88,6 +117,7 @@ struct Chrom{
     size: u32,
 }
 
+#[derive(Debug, PartialEq)]
 struct BedLine {
     chrom_id: u32,
     start: u32,
@@ -139,7 +169,7 @@ impl BPlusTreeFile {
         offsets.push_back(self.root_offset);
         while let Some(offset) = offsets.pop_back() {
             // move to the offset
-            println!("{}", reader.seek(SeekFrom::Start(offset)).unwrap());
+            reader.seek(SeekFrom::Start(offset));
             
             // read block header
             let is_leaf = reader.read_u8();
@@ -153,10 +183,9 @@ impl BPlusTreeFile {
                     if self.val_size != 8 {
                         panic!("Expected chromosome data to be 8 bytes not, {}", self.val_size)
                     }
-                    println!("read: {:?}", reader.read(&mut keybuf));
-                    println!("read: {:?}", reader.read(&mut valbuf));
-                    println!("{:?}", keybuf);
-                    println!("{:?}", valbuf);
+                    reader.read_exact(&mut keybuf);
+                    reader.read_exact(&mut valbuf);
+                    
                     let id = if self.big_endian {
                         u32::from_be_bytes(valbuf[0..4].try_into().unwrap())
                     } else {
@@ -328,20 +357,19 @@ impl CIRTreeFile {
     }
 
     fn find_blocks(&self, chrom_id: u32, start: u32, end: u32, reader: &mut File) -> Result<Vec<FileOffsetSize>,&'static str> {
-        eprintln!("find blocks");
         let mut blocks = Vec::<FileOffsetSize>::new();
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
         while let Some(offset) = offsets.pop_back() {
             // move to the offset
-            eprintln!("{:?}", reader.seek(SeekFrom::Start(offset)));
+            reader.seek(SeekFrom::Start(offset));
             
             // read block header
             let is_leaf = reader.read_u8();
             let reserved = reader.read_u8();
             let child_count = reader.read_u16(self.big_endian);
-            eprintln!("is_leaf {}", child_count);
-            eprintln!("child_count {}", child_count);
+            //eprintln!("is_leaf {}", child_count);
+            //eprintln!("child_count {}", child_count);
 
             if is_leaf != 0 {
                 for _  in 0..child_count {
@@ -351,13 +379,10 @@ impl CIRTreeFile {
                     let end_base = reader.read_u32(self.big_endian);
                     let offset = reader.read_u64(self.big_endian);
                     let size = reader.read_u64(self.big_endian);
-                    eprint!("chrom_id {}; start {}; end {}; start_chrom {}; start_base {}; end_chrom {}; end_base {};",
-                              chrom_id, start, end, start_chrom, start_base, end_chrom, end_base);
+                    //eprint!("chrom_id {}; start {}; end {}; start_chrom {}; start_base {}; end_chrom {}; end_base {};",
+                    //          chrom_id, start, end, start_chrom, start_base, end_chrom, end_base);
                     if cir_overlaps(chrom_id, start, end, start_chrom, start_base, end_chrom, end_base) {
-                        eprintln!("- true");
                         blocks.push(FileOffsetSize{offset, size})
-                    } else {
-                        eprintln!("- false");
                     }
                 }
             } else {
@@ -370,8 +395,8 @@ impl CIRTreeFile {
                     let offset = reader.read_u64(self.big_endian);
 
                     // if we have overlaps in this area, then we should explore the node
-                     eprint!("chrom_id {}; start {}; end {}; start_chrom {}; start_base {}; end_chrom {}; end_base {};",
-                              chrom_id, start, end, start_chrom, start_base, end_chrom, end_base);
+                    //eprint!("chrom_id {}; start {}; end {}; start_chrom {}; start_base {}; end_chrom {}; end_base {};",
+                    //         chrom_id, start, end, start_chrom, start_base, end_chrom, end_base);
                     if cir_overlaps(chrom_id, start, end, start_chrom, start_base, end_chrom, end_base) {
                         offsets.push_back(offset);
                     }
@@ -478,40 +503,162 @@ impl BigBed {
         Ok(())
     }
     
-    fn overlapping_blocks(&mut self, chrom: &str, 
+    fn overlapping_blocks(&mut self, chrom_id: u32, 
                           start: u32, end: u32) -> Result<Vec<FileOffsetSize>, &'static str> {
         
         // ensure that unzoomed_cir is attached
         self.attach_unzoomed_cir()?;
         // this operation is guaranteed to work now
         let index = self.unzoomed_cir.as_ref().unwrap();
+        Ok(index.find_blocks(chrom_id, start, end, &mut self.reader)?)
+    }
+ 
+    fn query(&mut self, chrom: &str, start: u32, end: u32, max_items: u32) -> Result<Vec<BedLine>, &'static str> {
+        let mut lines: Vec<BedLine> = Vec::new();
+        let mut item_count: u32 = 0;
 
-        // find the chrom data in the B+ tree
-        match self.chrom_bpt.find(&chrom, &mut self.reader)? {
-            Some(chrom) => {
-                    Ok(index.find_blocks(chrom.id, start, end, &mut self.reader)?)
+        let mut chrom_id: Option<u32> = None;
+        // search for the chrom_id
+        if let Some(chrom_data) = self.find_chrom(chrom)? {
+            chrom_id = Some(chrom_data.id);
+        // search for chrom_id without the 'chr'
+        } else if let Some(chrom_data) = self.find_chrom(&chrom[3..])? {
+            chrom_id = Some(chrom_data.id);
+        } else {
+            return Err("No data for chromosome.");
+        }
+        // this operation is safe, otherwise the return above will be invoked
+        let chrom_id =  chrom_id.unwrap();
+        // from kent:
+        // "Find blocks with padded start and end to make sure we include zero-length insertions"
+        let padded_start = if start > 0 {start - 1} else {start};
+        let padded_end = end + 1;
+        let blocks = self.overlapping_blocks(chrom_id, padded_start, padded_end)?;
+        
+        let mut remaining = &blocks[..];
+        while remaining.len() > 0 {
+            // iterate through the list of blocks, get a slice of contiguous blocks
+            let split = find_file_offset_gap(remaining);
+            let before_gap = split.0;
+            remaining = split.1;
+
+            // get the offset
+            let merged_offset = before_gap[0].offset;
+            // get the total size
+            // note: these unwraps are safe because we must have at least one element
+            // (otherwise the loop would terminate)
+            let merged_size = before_gap.last().unwrap().offset + before_gap.last().unwrap().size - merged_offset;
+            // read in all the contigious blocks
+            let mut merged_buff: Vec<u8> = vec![0; merged_size as usize];
+            self.reader.seek(SeekFrom::Start(merged_offset));
+            self.reader.read_exact(&mut merged_buff);
+            
+            let mut index: usize = 0;
+            // for each block in the merged group
+            for block in before_gap {
+                let (buff, block_end) = if self.uncompress_buf_size > 0 {
+                    panic!("COMPRESSED DATA RECEIVED")
+                } else {
+                    (&merged_buff, index + block.size as usize)
+                };
+                // iterate over the individual bytes in this block
+                while index < block_end {
+                    // read in chrom_id
+                    let bytes: [u8; 4] = buff[index..index+4].try_into().expect("Failed to convert bytes");
+                    let chr = if self.big_endian {u32::from_be_bytes(bytes)} else {u32::from_le_bytes(bytes)};
+                    index += 4;
+                    // read in start
+                    let bytes: [u8; 4] = buff[index..index+4].try_into().expect("Failed to convert bytes");
+                    let s = if self.big_endian {u32::from_be_bytes(bytes)} else {u32::from_le_bytes(bytes)};
+                    index += 4;
+                    // read in end
+                    let bytes: [u8; 4] = buff[index..index+4].try_into().expect("Failed to convert bytes");
+                    let e = if self.big_endian {u32::from_be_bytes(bytes)} else {u32::from_le_bytes(bytes)};
+                    index += 4;
+
+                    // calculate how much data is left (if any)
+                    // find the next '\0' character
+                    let mut rest_length = 0;
+                    for (index, byte) in buff[index..block_end].iter().enumerate() {
+                        if byte == &0 {
+                            rest_length = index;
+                            break;
+                        }
+                    }
+                    // check if this data is in the correct range
+                    if chr == chrom_id && ( (s < end && e > start) || (s == e && (s == end || end == start) )) {
+                        item_count += 1;
+                        if max_items > 0 && item_count > max_items {
+                            break;
+                        }
+                        let rest = if rest_length > 0 {
+                            Some(String::from_utf8(buff[index..rest_length].to_vec()).unwrap())
+                        } else {
+                            None
+                        };
+                        lines.push(BedLine{
+                            chrom_id: chr,
+                            start: s,
+                            end: e,
+                            rest
+                        })
+                        // get the rest of the data if it is present
+                        // add the BedLine to the list
+                    }
+                    // rest_length + 1 will be at the null character
+                    index += rest_length + 1;
+                }
+                // propagate the break statement
+                if max_items > 0 && item_count > max_items {
+                    break;
+                }
             }
-            None => {
-                // try without the 'chr'
-                match self.chrom_bpt.find(&chrom[3..], &mut self.reader)? {
-                    Some(chrom) => Ok(index.find_blocks(chrom.id, start, end, &mut self.reader)?),
-                    None => Err("No data for chromosome."),
+            if max_items > 0 && item_count > max_items {
+                break;
+            }
+        }
+        Ok(lines)
+    }
+
+    fn to_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>) {
+        let item_count = 0;
+        for chrom_data in self.chrom_list() {
+            //TODO: check for null characters
+            if let Some(name) = chrom {
+                if name != strip_null(&chrom_data.name) {
+                    continue
+                }
+            }
+            let start = match start {
+                None => 0,
+                Some(value) => value,
+            };
+            let end = match end {
+                None => chrom_data.size,
+                Some(value) => value,
+            };
+            // check on the total number of items
+            let mut items_left = 0;
+            if let Some(max_value) = max_items {
+                items_left = max_value - item_count;
+                // stop iteration if we have exceeded the limit
+                if items_left <= 0 {
+                    break;
+                }
+            }
+
+            let name_to_print = strip_null(&chrom_data.name);
+            let interval_list = self.query(&chrom_data.name, start, end, items_left).unwrap();
+            for bed_line in interval_list.into_iter() {
+                match bed_line.rest {
+                    None => {
+                        println!("{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end)
+                    } Some(data) => {
+                        println!("{}\t{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end, data);
+                    }
                 }
             }
         }
-    }
- 
-    fn query(&mut self, start: u32, end: u32, items: u32) -> Result<Vec<BedLine>, &'static str> {
-        let lines: Vec<BedLine> = Vec::new();
-        // this will never fail, because we just attached the index
-        
-
-        // from kent:
-        // "Find blocks with padded start and end to make sure we include zero-length insertions"
-        let paddedStart = if start > 0 {start - 1} else {start};
-        let paddedEnd = end + 1;
-
-        Ok(lines)
     }
 
     fn chrom_list(&mut self) -> Vec<Chrom> {
@@ -752,13 +899,13 @@ mod test_bb {
     #[test]
     fn test_overlapping_blocks() {
         let mut bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
-        assert_eq!(bb.overlapping_blocks("chr1", 100, 1000000), Ok(vec![FileOffsetSize{offset: 984, size: 3324}]));
+        assert_eq!(bb.overlapping_blocks(0, 100, 1000000), Ok(vec![FileOffsetSize{offset: 984, size: 3324}]));
         // swapped start and stop positions should produce no blocks
-        assert_eq!(bb.overlapping_blocks("chr1", 100000, 10), Ok(vec![]));
+        assert_eq!(bb.overlapping_blocks(0, 100000, 10), Ok(vec![]));
         // trying a more narrow range
-        assert_eq!(bb.overlapping_blocks("chr8", 131366255, 132257727), Ok(vec![FileOffsetSize{offset: 67045, size: 3295}]));
-        // bad chromosome should produce an error
-        assert_eq!(bb.overlapping_blocks("chrZ", 100000, 10), Err("No data for chromosome."));
+        assert_eq!(bb.overlapping_blocks(20, 131366255, 132257727), Ok(vec![FileOffsetSize{offset: 67045, size: 3295}]));
+        // bad chromosome should just produce no blocks
+        assert_eq!(bb.overlapping_blocks(42, 100000, 10), Ok(vec![]));
     }
 }
 
@@ -770,8 +917,7 @@ fn main() {
     }
     match BigBed::from_file(&args[1]) {
         Ok(mut bb) => {
-            //println!("{:#?}", bb);
-            println!("{:#?}", bb.find_chrom("chr7"));
+            bb.to_bed(None, None, None, None);
         }
         Err(msg) => {
             eprintln!("{}", msg);

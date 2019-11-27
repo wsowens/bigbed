@@ -4,6 +4,9 @@ version = "0.1.0"
 authors = ["William Owens <wowens@ufl.edu>"]
 edition = "2018"
 license = "GPL-3.0"
+description = """
+A crate for dealing with BigBed files.
+"""
 
 [dependencies]
 flate2 = "1.0.13"

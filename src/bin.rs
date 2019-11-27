@@ -705,9 +705,9 @@ impl BigBed {
                     for bed_line in interval_list.into_iter() {
                         match bed_line.rest {
                             None => {
-                                output.write(format!("{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end).as_bytes());
+                                output.write(format!("{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end).as_bytes());
                             } Some(data) => {
-                                output.write(format!("{}\t{}\t{}\t{}", name_to_print, bed_line.start, bed_line.end, data).as_bytes());
+                                output.write(format!("{}\t{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end, data).as_bytes());
                             }
                         }
                     }

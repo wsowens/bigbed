@@ -1,6 +1,6 @@
 use std::fs::File;
-use std::io::{Read, Seek, BufReader, BufRead, Write, BufWriter};
-use std::io::SeekFrom;
+use std::io;
+use std::io::{Read, Seek, SeekFrom, BufReader, BufRead, Write, BufWriter};
 use std::collections::VecDeque;
 use std::convert::TryInto;
 
@@ -140,7 +140,7 @@ struct BPlusTreeFile {
 }
 
 impl BPlusTreeFile {
-    fn with_reader(reader: &mut BufReader<File>) -> Result<BPlusTreeFile, &'static str> {
+    fn with_reader<T: Read + Seek + ByteReader>(reader: &mut T) -> Result<BPlusTreeFile, &'static str> {
         // check the signature first
         let mut buff = [0; 4];
         reader.read_exact(&mut buff).propagate()?;
@@ -164,9 +164,8 @@ impl BPlusTreeFile {
         Ok(BPlusTreeFile{big_endian, block_size, key_size, val_size, item_count, root_offset})
     }
 
-
     //TODO: eventually abstract the traversal function as an iterator
-    fn chrom_list(&self, reader: &mut BufReader<File>) -> Vec<Chrom> {
+    fn chrom_list<T: Read + Seek + ByteReader>(&self, reader: &mut T) -> Vec<Chrom> {
         // move reader to the root_offset
         let mut chroms: Vec<Chrom> = Vec::new();
         let mut offsets = VecDeque::new();
@@ -218,7 +217,7 @@ impl BPlusTreeFile {
     }
 
     // TODO: abstract this method
-    fn find(&self, chrom: &str, reader: &mut BufReader<File>) -> Result<Option<Chrom>, &'static str> {
+    fn find<T: Read + Seek + ByteReader>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, &'static str> {
         if chrom.len() > self.key_size.try_into().unwrap() {
             return Err("Key too long.")
         }
@@ -238,7 +237,7 @@ impl BPlusTreeFile {
         }
     }
 
-    fn _find_internal(&self, chrom: &str, reader: &mut BufReader<File>) -> Result<Option<Chrom>, &'static str> {
+    fn _find_internal<T: Read + Seek + ByteReader>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, &'static str> {
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
         while let Some(offset) = offsets.pop_back() {
@@ -320,7 +319,7 @@ fn cir_overlaps(q_chrom: u32, q_start: u32, q_end: u32,
 }
 
 impl CIRTreeFile {
-    fn with_reader(reader: &mut BufReader<File>) -> Result<CIRTreeFile, &'static str> {
+    fn with_reader<T: Read + Seek + ByteReader>(reader: &mut T) -> Result<CIRTreeFile, &'static str> {
         // check the signature first
         let mut buff = [0; 4];
         reader.read_exact(&mut buff).propagate()?;
@@ -360,7 +359,7 @@ impl CIRTreeFile {
         })
     }
 
-    fn find_blocks(&self, chrom_id: u32, start: u32, end: u32, reader: &mut BufReader<File>) -> Result<Vec<FileOffsetSize>,&'static str> {
+    fn find_blocks<T: Read + Seek + ByteReader>(&self, chrom_id: u32, start: u32, end: u32, reader: &mut T) -> Result<Vec<FileOffsetSize>,&'static str> {
         let mut blocks = Vec::<FileOffsetSize>::new();
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
@@ -412,8 +411,8 @@ impl CIRTreeFile {
 }
 
 #[derive(Debug)]
-struct BigBed {
-    reader: BufReader<File>,
+struct BigBed<T: Read + Seek + ByteReader>  {
+    reader: T,
     pub big_endian: bool,
     pub version: u16,
     pub zoom_levels: u16,
@@ -434,9 +433,8 @@ struct BigBed {
     unzoomed_cir: Option<CIRTreeFile>,
 }
 
-impl BigBed {
-    fn from_file(filename: &str) -> Result<BigBed, &'static str> {
-        let mut reader = BufReader::new(File::open(filename).propagate()?);
+impl<T: Read + Seek + ByteReader> BigBed<T> {
+    fn from_file(mut reader: T) -> Result<BigBed<T>, &'static str> {
         let mut buff = [0; 4];
         reader.read_exact(&mut buff).propagate()?;
         let big_endian =
@@ -595,7 +593,7 @@ impl BigBed {
                         }
                     }
                     //eprintln!("total out {:?}", decomp.total_out());
-                    block_end = (decomp.total_out() as usize);
+                    block_end = decomp.total_out() as usize;
                     decomp.reset(true);
                     buff = &*debuff;
                 }
@@ -730,23 +728,29 @@ mod test_bb {
     use super::*;
 
     //TODO: add testcase for nonexistent file
+    fn bb_from_file(filename: &str) -> Result<BigBed<File>, &'static str> {
+        match File::open(filename) {
+            Err(msg) => Err("Static I/O error"),
+            Ok(reader) => BigBed::from_file(reader)
+        }
+    }
 
     //test for file signatures
     #[test]
     fn from_file_not_bigbed() {
         // this produces a 'File I/O error because the file is empty (no bytes can be read)
-        let result = BigBed::from_file("test/beds/empty.bed").unwrap_err();
+        let result = bb_from_file("test/beds/empty.bed").unwrap_err();
         assert_eq!(result, "File I/O error");
-        let result = BigBed::from_file("test/beds/one.bed").unwrap_err();
+        let result = bb_from_file("test/beds/one.bed").unwrap_err();
         assert_eq!(result, "This is not a bigbed file!");
-        let result = BigBed::from_file("test/notbed.png").unwrap_err();
+        let result = bb_from_file("test/notbed.png").unwrap_err();
         assert_eq!(result, "This is not a bigbed file!");
     }
 
     //test a bigbed made from a one-line bed file
     #[test]
     fn from_file_onebed() {
-        let bb = BigBed::from_file("test/bigbeds/one.bb").unwrap();
+        let bb = bb_from_file("test/bigbeds/one.bb").unwrap();
         assert_eq!(bb.as_offset, 304);
         assert_eq!(bb.chrom_tree_offset, 628);
         assert_eq!(bb.defined_field_count, 3);
@@ -770,7 +774,7 @@ mod test_bb {
 
     #[test]
     fn from_file_longbed() {
-        let bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        let bb = bb_from_file("test/bigbeds/long.bb").unwrap();
         assert_eq!(bb.as_offset, 304);
         assert_eq!(bb.chrom_tree_offset, 628);
         assert_eq!(bb.defined_field_count, 3);
@@ -798,13 +802,13 @@ mod test_bb {
 
     #[test]
     fn test_chrom_list() {
-        let mut bb = BigBed::from_file("test/bigbeds/one.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/one.bb").unwrap();
         // should only include the chromosomes mapped in the file
         assert_eq!(bb.chrom_list(), vec![Chrom{name: String::from("chr7"), id: 0, size: 159345973}]);
         // same list should be generated a second time
         assert_eq!(bb.chrom_list(), vec![Chrom{name: String::from("chr7"), id: 0, size: 159345973}]);
         // should include all chromosomes
-        let mut bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/long.bb").unwrap();
         assert_eq!(bb.chrom_list(), vec![
             Chrom{name: String::from("chr1\0"), id: 0, size: 248956422},
             Chrom{name: String::from("chr10"), id: 1, size: 133797422},
@@ -831,7 +835,7 @@ mod test_bb {
             Chrom{name: String::from("chrX\0"), id: 22, size: 156040895},
             Chrom{name: String::from("chrY\0"), id: 23, size: 57227415}
         ]);
-        let mut bb = BigBed::from_file("test/bigbeds/tair10-nochr.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/tair10-nochr.bb").unwrap();
         assert_eq!(bb.chrom_list(), vec![
             Chrom{name: String::from("1"), id: 0, size: 30427671},
             Chrom{name: String::from("2"), id: 1, size: 19698289},
@@ -841,7 +845,7 @@ mod test_bb {
             Chrom{name: String::from("C"), id: 5, size: 154478},
             Chrom{name: String::from("M"), id: 6, size: 366924}
         ]);
-        let mut bb = BigBed::from_file("test/bigbeds/tair10.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/tair10.bb").unwrap();
         assert_eq!(bb.chrom_list(), vec![
             Chrom{name: String::from("Chr1"), id: 0, size: 30427671},
             Chrom{name: String::from("Chr2"), id: 1, size: 19698289},
@@ -852,7 +856,7 @@ mod test_bb {
             Chrom{name: String::from("ChrM"), id: 6, size: 366924}
         ]);
         // testing with an extremely large chrom.sizes file:
-        let mut bb = BigBed::from_file("test/bigbeds/mm10.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/mm10.bb").unwrap();
         assert_eq!(bb.chrom_list(), vec![
             Chrom{name: String::from("chr1\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 0, size: 195471971},
             Chrom{name: String::from("chr10\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0"), id: 1, size: 130694993},
@@ -925,7 +929,7 @@ mod test_bb {
     
     #[test]
     fn test_find_chrom_one() {
-         let mut bb = BigBed::from_file("test/bigbeds/one.bb").unwrap();
+         let mut bb = bb_from_file("test/bigbeds/one.bb").unwrap();
          assert_eq!(bb.find_chrom("chr1").unwrap(), None);
          assert_eq!(bb.find_chrom("chr7").unwrap(), Some(Chrom{name: String::from("chr7"), id: 0, size: 159345973}));
          // does it work again?
@@ -941,7 +945,7 @@ mod test_bb {
 
     #[test]
     fn test_find_chrom_long() {
-        let mut bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/long.bb").unwrap();
         assert_eq!(bb.find_chrom("chr2\0").unwrap(), Some(Chrom{name: String::from("chr2\0"), id: 11, size: 242193529}));
         // should work without padding
         assert_eq!(bb.find_chrom("chr2").unwrap(), Some(Chrom{name: String::from("chr2\0"), id: 11, size: 242193529}));
@@ -953,7 +957,7 @@ mod test_bb {
 
     #[test]
     fn test_overlapping_blocks() {
-        let mut bb = BigBed::from_file("test/bigbeds/long.bb").unwrap();
+        let mut bb = bb_from_file("test/bigbeds/long.bb").unwrap();
         assert_eq!(bb.overlapping_blocks(0, 100, 1000000), Ok(vec![FileOffsetSize{offset: 984, size: 3324}]));
         // swapped start and stop positions should produce no blocks
         assert_eq!(bb.overlapping_blocks(0, 100000, 10), Ok(vec![]));
@@ -970,19 +974,26 @@ fn main() {
         eprintln!("Error: Please provide !");
         std::process::exit(1);
     }
-    match BigBed::from_file(&args[1]) {
-        Ok(mut bb) => {
-            let mut output = if args.len() == 3 {
-                Some(
-                    BufWriter::new(File::create(&args[2]).unwrap())
-                )
-            } else {
-                None
-            };
-            bb.to_bed(None, None, None, None, output);
-        }
-        Err(msg) => {
-            eprintln!("{}", msg);
+    match File::open(&args[1]) {
+        Err(err) => {
+            eprintln!("{}", err);
+            eprintln!("Could not open file: {}", args[1]);
+        } Ok(file) => {
+            match BigBed::from_file(file) {
+                Ok(mut bb) => {
+                    let mut output = if args.len() == 3 {
+                        Some(
+                            BufWriter::new(File::create(&args[2]).unwrap())
+                        )
+                    } else {
+                        None
+                    };
+                    bb.to_bed(None, None, None, None, output);
+                }
+                Err(msg) => {
+                    eprintln!("{}", msg);
+                }
+            }
         }
     }
 }

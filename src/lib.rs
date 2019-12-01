@@ -14,7 +14,7 @@ static BPT_SIG: [u8; 4] = [0x78, 0xCA, 0x8C, 0x91];
 static CIRTREE_SIG: [u8; 4] = [0x24, 0x68, 0xAC, 0xE0];
 
 
-/// a collection of useful methods for producing bytes from a Readable struct
+/// a collection of useful methods for producing bytes from a type that implements Read
 trait ByteReader: Read {
     fn read_u64(&mut self, big_endian: bool) -> u64 {
         let mut bytes: [u8; 8] = [0;8];
@@ -690,6 +690,7 @@ impl<T: Read + Seek> BigBed<T> {
 
 #[cfg(test)]
 mod test_bb {
+    use std::fs::File;
     use super::*;
 
     //TODO: add testcase for nonexistent file

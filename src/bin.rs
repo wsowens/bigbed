@@ -26,6 +26,12 @@ fn main() {
                 .help("Path for output BED file")
                 .index(2)
         )
+        .arg(
+            Arg::with_name("chr")
+                .help("if set, restrict output to given chromosome")
+                .takes_value(true)
+                .long("chr")
+        )
         .get_matches();
     
     // determine if we should use stdout or create a new file
@@ -45,6 +51,8 @@ fn main() {
             }
         }
     );
+    let chrom = matches.value_of("chr");
+
     // this will always work, since input is required arg
     let filename = matches.value_of("input.bb").unwrap();
     // try to open the file
@@ -61,7 +69,7 @@ fn main() {
             match result {
                 Ok(mut bigbed) => {
                     // attempt to convert BigBed to a BED using the provided parameters
-                    let result = bigbed.to_bed(None, None, None, None, output);
+                    let result = bigbed.to_bed(chrom, None, None, None, output);
                     // handle any errors
                     if let Err(err) = result {
                         eprintln!("{}", err);

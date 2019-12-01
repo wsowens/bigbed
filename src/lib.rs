@@ -155,7 +155,7 @@ impl BPlusTreeFile {
         let mut chroms: Vec<Chrom> = Vec::new();
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
-        while let Some(offset) = offsets.pop_back() {
+        while let Some(offset) = offsets.pop_front() {
             // move to the offset
             reader.seek(SeekFrom::Start(offset))?;
             
@@ -163,7 +163,6 @@ impl BPlusTreeFile {
             let is_leaf = reader.read_u8();
             let _reserved = reader.read_u8();
             let child_count = reader.read_u16(self.big_endian);
-
             if is_leaf != 0 {
                 let mut valbuf: Vec<u8> = vec![0; self.val_size.try_into().unwrap()];
                 for _  in 0..child_count {
@@ -185,17 +184,20 @@ impl BPlusTreeFile {
                     } else {
                         u32::from_le_bytes(valbuf[4..8].try_into().unwrap())
                     };
-                    chroms.push(Chrom{
+                    let chrom = Chrom{
                         name: String::from_utf8(keybuf).unwrap(), id, size
-                    })
+                    };
+                    chroms.push(chrom);
                 }
             } else {
                 for _ in 0..child_count {
                     // skip over the key in each block
-                    // note that keysize is typically a few bytes, so this should not panic
+                    // note that keysize is typically a few bytes, so converting into 
+                    // the i32 format should not cause a panic
                     reader.seek(SeekFrom::Current(self.key_size.try_into()?))?;
                     // read an offset and add it to the list to traverse
-                    offsets.push_back(reader.read_u64(self.big_endian));
+                    let offset = reader.read_u64(self.big_endian);
+                    offsets.push_back(offset);
                 }
             }
         }
@@ -226,7 +228,7 @@ impl BPlusTreeFile {
     fn _find_internal<T: Read + Seek>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, Error> {
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
-        while let Some(offset) = offsets.pop_back() {
+        while let Some(offset) = offsets.pop_front() {
             // move to the offset
             reader.seek(SeekFrom::Start(offset))?;
 
@@ -234,7 +236,6 @@ impl BPlusTreeFile {
             let is_leaf = reader.read_u8();
             let _reserved = reader.read_u8();
             let child_count = reader.read_u16(self.big_endian);
-
             if is_leaf != 0 {
                 let mut valbuf: Vec<u8> = vec![0; self.val_size.try_into().unwrap()];
                 for _  in 0..child_count {
@@ -263,7 +264,6 @@ impl BPlusTreeFile {
             } else {
                 // skip past the first key
                 reader.seek(SeekFrom::Current(self.key_size.try_into()?))?;
-
                 // read the offset
                 let mut prev_offset = reader.read_u64(self.big_endian);
                 for _ in 1..child_count {
@@ -272,11 +272,12 @@ impl BPlusTreeFile {
                     let other_key = String::from_utf8(keybuf).unwrap();
                     // if find a bigger key, that means we passed our good key
                     if chrom < &other_key {
-                        offsets.push_back(prev_offset);
+                        break;
                     }
                     // otherwise: read the next offset and keep going
                     prev_offset = reader.read_u64(self.big_endian);
                 }
+                offsets.push_back(prev_offset);
             }
         }
         Ok(None)
@@ -349,7 +350,7 @@ impl CIRTreeFile {
         let mut blocks = Vec::<FileOffsetSize>::new();
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
-        while let Some(offset) = offsets.pop_back() {
+        while let Some(offset) = offsets.pop_front() {
             // move to the offset
             reader.seek(SeekFrom::Start(offset))?;
             
@@ -357,8 +358,6 @@ impl CIRTreeFile {
             let is_leaf = reader.read_u8();
             let _reserved = reader.read_u8();
             let child_count = reader.read_u16(self.big_endian);
-            //eprintln!("is_leaf {}", child_count);
-            //eprintln!("child_count {}", child_count);
 
             if is_leaf != 0 {
                 for _  in 0..child_count {
@@ -550,8 +549,6 @@ impl<T: Read + Seek> BigBed<T> {
             
             
             // for each block in the merged group
-            //eprintln!("{}", merged_buff.len());
-            //eprintln!("{:?}", before_gap);
             for block in before_gap {
                 let mut index: usize = 0;
                 let block_start = block.offset - merged_offset;
@@ -560,7 +557,6 @@ impl<T: Read + Seek> BigBed<T> {
                 if self.uncompress_buf_size > 0 {
                     let debuff =  decom_buff.as_mut().unwrap();
                     let decomp =  decompressor.as_mut().unwrap();
-                    //eprintln!("new block {} {}", block_start, block_end);
                     let status = decomp.decompress(&buff, debuff, FlushDecompress::Finish)?;
                     match status {
                         flate2::Status::Ok | flate2::Status::StreamEnd => {}
@@ -568,9 +564,7 @@ impl<T: Read + Seek> BigBed<T> {
                             eprintln!("{:?}", status);
                             return Err(Error::Misc("Decompression error!"));
                         }
-                    }   
-
-                    //eprintln!("total out {:?}", decomp.total_out());
+                    }
                     block_end = decomp.total_out() as usize;
                     decomp.reset(true);
                     buff = &*debuff;
@@ -599,8 +593,6 @@ impl<T: Read + Seek> BigBed<T> {
                             break;
                         }
                     }
-                    //eprintln!("{} {} {} {}", chr, s, e, rest_length);
-                    //eprintln!("{}, {}", index, rest_length + index);
                     // check if this data is in the correct range
                     if chr == chrom_id && ( (s < end && e > start) || (s == e && (s == end || end == start) )) {
                         item_count += 1;
@@ -622,7 +614,6 @@ impl<T: Read + Seek> BigBed<T> {
                         });
                     }
                     // rest_length + 1 will be at the null character
-                    //eprintln!("pastloop");
                     index += rest_length + 1;
                 }
                 // propagate the break statement
@@ -665,7 +656,7 @@ impl<T: Read + Seek> BigBed<T> {
             }
 
             let name_to_print = strip_null(&chrom_data.name);
-            let interval_list = self.query(&chrom_data.name, start, end, items_left).unwrap();
+            let interval_list = self.query(&chrom_data.name, start, end, items_left)?;
             for bed_line in interval_list.into_iter() {
                 match bed_line.rest {
                     None => {

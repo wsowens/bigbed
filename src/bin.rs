@@ -1,6 +1,5 @@
 use std::fs::File;
-use std::io;
-use std::io::{Read, Seek, SeekFrom, BufReader, BufRead, Write, BufWriter};
+use std::io::{self, Read, Seek, SeekFrom, BufReader, BufRead, Write, BufWriter};
 use std::collections::VecDeque;
 use std::convert::TryInto;
 
@@ -52,23 +51,46 @@ trait ByteReader: std::io::Read {
     }
 }
 
-impl ByteReader for File {}
-impl ByteReader for BufReader<File> {}
+impl<T: Read> ByteReader for T {}
 
-// a trait to ease with error propagation
-trait Propagate<T> {
-    fn propagate(self) -> Result<T, &'static str>;
+
+#[derive(Debug)]
+struct IOErrorWrapper(io::Error);
+
+impl PartialEq for IOErrorWrapper {
+    fn eq(&self, other: &IOErrorWrapper) -> bool {
+        false
+    }
+    fn ne(&self, other: &IOErrorWrapper) -> bool {
+        true
+    }
 }
 
-impl<T> Propagate<T> for std::io::Result<T> {
-    fn propagate(self) -> Result<T, &'static str> {
-        match self {
-            Ok(x) => Ok(x),
-            Err(x) => {
-                eprintln!("{}", x);
-                Err("File I/O error")
-            }
-        }
+#[derive(Debug, PartialEq)]
+enum Error {
+    IOError(IOErrorWrapper),
+    DecompressError,
+    BadSig{expected: [u8; 4], received: [u8; 4]},
+    BadChrom(String),
+    BadKey(String, usize),
+    Misc(&'static str)
+}
+
+impl From<io::Error> for Error {
+    fn from(e: io::Error) -> Error {
+        Error::IOError(IOErrorWrapper(e))
+    }
+}
+
+impl From<&'static str> for Error {
+    fn from(e: &'static str) -> Error {
+        Error::Misc(e)
+    }
+}
+
+impl From<flate2::DecompressError> for Error {
+    fn from(e: flate2::DecompressError) -> Error {
+        Error::DecompressError
     }
 }
 
@@ -140,17 +162,17 @@ struct BPlusTreeFile {
 }
 
 impl BPlusTreeFile {
-    fn with_reader<T: Read + Seek + ByteReader>(reader: &mut T) -> Result<BPlusTreeFile, &'static str> {
+    fn with_reader<T: Read + Seek + ByteReader>(reader: &mut T) -> Result<BPlusTreeFile, Error> {
         // check the signature first
         let mut buff = [0; 4];
-        reader.read_exact(&mut buff).propagate()?;
+        reader.read_exact(&mut buff)?;
         let big_endian =
             if buff == BPT_SIG {
                 true
             } else if buff.iter().eq(BPT_SIG.iter().rev()) {
                 false
             } else {
-                return Err("This is not a BPT file!");
+                return Err(Error::BadSig{expected: BPT_SIG, received: buff});
             };
 
         //read all the header information
@@ -160,7 +182,7 @@ impl BPlusTreeFile {
         let item_count = reader.read_u64(big_endian);
 
         // skip over the reserved region and get the root offset
-        let root_offset = reader.seek(SeekFrom::Current(8)).propagate()?;
+        let root_offset = reader.seek(SeekFrom::Current(8))?;
         Ok(BPlusTreeFile{big_endian, block_size, key_size, val_size, item_count, root_offset})
     }
 
@@ -183,6 +205,7 @@ impl BPlusTreeFile {
                 let mut valbuf: Vec<u8> = vec![0; self.val_size.try_into().unwrap()];
                 for _  in 0..child_count {
                     let mut keybuf: Vec<u8> = vec![0; self.key_size.try_into().unwrap()];
+                    //TODO: move this into the declaration of the file
                     if self.val_size != 8 {
                         panic!("Expected chromosome data to be 8 bytes not, {}", self.val_size)
                     }
@@ -217,9 +240,9 @@ impl BPlusTreeFile {
     }
 
     // TODO: abstract this method
-    fn find<T: Read + Seek + ByteReader>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, &'static str> {
+    fn find<T: Read + Seek + ByteReader>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, Error> {
         if chrom.len() > self.key_size.try_into().unwrap() {
-            return Err("Key too long.")
+            return Err(Error::BadKey(chrom.to_owned(), self.key_size as usize))
         }
         // if key is too short, we need to pad it with null character
         if chrom.len() != (self.key_size as usize) {
@@ -237,7 +260,7 @@ impl BPlusTreeFile {
         }
     }
 
-    fn _find_internal<T: Read + Seek + ByteReader>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, &'static str> {
+    fn _find_internal<T: Read + Seek + ByteReader>(&self, chrom: &str, reader: &mut T) -> Result<Option<Chrom>, Error> {
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
         while let Some(offset) = offsets.pop_back() {
@@ -319,17 +342,17 @@ fn cir_overlaps(q_chrom: u32, q_start: u32, q_end: u32,
 }
 
 impl CIRTreeFile {
-    fn with_reader<T: Read + Seek + ByteReader>(reader: &mut T) -> Result<CIRTreeFile, &'static str> {
+    fn with_reader<T: Read + Seek + ByteReader>(reader: &mut T) -> Result<CIRTreeFile, Error> {
         // check the signature first
         let mut buff = [0; 4];
-        reader.read_exact(&mut buff).propagate()?;
+        reader.read_exact(&mut buff)?;
         let big_endian =
             if buff == CIRTREE_SIG {
                 true
             } else if buff.iter().eq(CIRTREE_SIG.iter().rev()) {
                 false
             } else {
-                return Err("This is not a CIRTree file!");
+                return Err(Error::BadSig{expected: CIRTREE_SIG, received: buff});
             };
 
         //read all the header information
@@ -343,7 +366,7 @@ impl CIRTreeFile {
         let items_per_slot = reader.read_u32(big_endian);
 
         // skip over the reserved region and get the root offset
-        let root_offset = reader.seek(SeekFrom::Current(4)).propagate()?;
+        let root_offset = reader.seek(SeekFrom::Current(4))?;
 
         Ok(CIRTreeFile{
             big_endian,
@@ -359,7 +382,7 @@ impl CIRTreeFile {
         })
     }
 
-    fn find_blocks<T: Read + Seek + ByteReader>(&self, chrom_id: u32, start: u32, end: u32, reader: &mut T) -> Result<Vec<FileOffsetSize>,&'static str> {
+    fn find_blocks<T: Read + Seek + ByteReader>(&self, chrom_id: u32, start: u32, end: u32, reader: &mut T) -> Result<Vec<FileOffsetSize>, Error> {
         let mut blocks = Vec::<FileOffsetSize>::new();
         let mut offsets = VecDeque::new();
         offsets.push_back(self.root_offset);
@@ -405,7 +428,7 @@ impl CIRTreeFile {
                     }
                 }
             }
-        } 
+        }
         Ok(blocks)
     }
 }
@@ -434,16 +457,16 @@ struct BigBed<T: Read + Seek + ByteReader>  {
 }
 
 impl<T: Read + Seek + ByteReader> BigBed<T> {
-    fn from_file(mut reader: T) -> Result<BigBed<T>, &'static str> {
+    fn from_file(mut reader: T) -> Result<BigBed<T>, Error> {
         let mut buff = [0; 4];
-        reader.read_exact(&mut buff).propagate()?;
+        reader.read_exact(&mut buff)?;
         let big_endian =
             if buff == BIGBED_SIG {
                 true
             } else if buff.iter().eq(BIGBED_SIG.iter().rev()) {
                 false
             } else {
-                return Err("This is not a bigbed file!");
+                return Err(Error::BadSig{expected: BIGBED_SIG, received: buff});
             };
         let version = reader.read_u16(big_endian);
         let zoom_levels = reader.read_u16(big_endian);
@@ -473,14 +496,14 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
 
         if extension_offset != 0 {
             // move to extension
-            reader.seek(SeekFrom::Start(extension_offset)).propagate()?;
+            reader.seek(SeekFrom::Start(extension_offset))?;
             extension_size = Some(reader.read_u16(big_endian));
             extra_index_count = Some(reader.read_u16(big_endian));
             extra_index_list_offset = Some(reader.read_u64(big_endian));
         }
 
         //move to the B+ tree file region
-        reader.seek(SeekFrom::Start(chrom_tree_offset)).propagate()?;
+        reader.seek(SeekFrom::Start(chrom_tree_offset))?;
         let chrom_bpt = BPlusTreeFile::with_reader(&mut reader)?;
 
         Ok(BigBed{
@@ -493,7 +516,7 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
         })
     }
     
-    fn attach_unzoomed_cir(&mut self) -> Result<(), &'static str>{
+    fn attach_unzoomed_cir(&mut self) -> Result<(), Error>{
         if self.unzoomed_cir.is_none() {
             // if not, seek to where the reader should be
             self.reader.seek(SeekFrom::Start(self.unzoomed_index_offset));
@@ -506,7 +529,7 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
     }
     
     fn overlapping_blocks(&mut self, chrom_id: u32, 
-                          start: u32, end: u32) -> Result<Vec<FileOffsetSize>, &'static str> {
+                          start: u32, end: u32) -> Result<Vec<FileOffsetSize>, Error> {
         
         // ensure that unzoomed_cir is attached
         self.attach_unzoomed_cir()?;
@@ -515,7 +538,7 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
         Ok(index.find_blocks(chrom_id, start, end, &mut self.reader)?)
     }
  
-    fn query(&mut self, chrom: &str, start: u32, end: u32, max_items: u32) -> Result<Vec<BedLine>, &'static str> {
+    fn query(&mut self, chrom: &str, start: u32, end: u32, max_items: u32) -> Result<Vec<BedLine>, Error> {
         let mut lines: Vec<BedLine> = Vec::new();
         let mut item_count: u32 = 0;
 
@@ -527,8 +550,7 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
         } else if let Some(chrom_data) = self.find_chrom(&chrom[3..])? {
             chrom_id = Some(chrom_data.id);
         } else {
-            eprintln!("{}", chrom);
-            return Err("No data for chromosome.");
+            return Err(Error::BadChrom(chrom.to_owned()));
         }
         // this operation is safe, otherwise the return above will be invoked
         let chrom_id =  chrom_id.unwrap();
@@ -576,22 +598,15 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
                     let debuff =  decom_buff.as_mut().unwrap();
                     let decomp =  decompressor.as_mut().unwrap();
                     //eprintln!("new block {} {}", block_start, block_end);
-                    let result = decomp.decompress(&buff, debuff, FlushDecompress::Finish);
-                    match result {
-                        Err(e) => {
-                            eprintln!("{}",e);
-                            return Err("Decompression error!");
+                    let status = decomp.decompress(&buff, debuff, FlushDecompress::Finish)?;
+                    match status {
+                        flate2::Status::Ok | flate2::Status::StreamEnd => {}
+                        _ => {
+                            eprintln!("{:?}", status);
+                            return Err(Error::Misc("Decompression error!"));
                         }
-                        Ok(status) => {
-                            match status {
-                                flate2::Status::Ok | flate2::Status::StreamEnd => {}
-                                _ => {
-                                    eprintln!("{:?}", status);
-                                    return Err("Decompression error!");
-                                }
-                            }   
-                        }
-                    }
+                    }   
+
                     //eprintln!("total out {:?}", decomp.total_out());
                     block_end = decomp.total_out() as usize;
                     decomp.reset(true);
@@ -659,7 +674,7 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
         Ok(lines)
     }
 
-    fn to_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>, mut output: Option<impl Write>) {
+    fn to_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>, mut output: Option<impl Write>) -> Result<(), Error> {
         let item_count = 0;
         for chrom_data in self.chrom_list() {
             //TODO: check for null characters
@@ -703,22 +718,23 @@ impl<T: Read + Seek + ByteReader> BigBed<T> {
                     for bed_line in interval_list.into_iter() {
                         match bed_line.rest {
                             None => {
-                                output.write(format!("{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end).as_bytes());
+                                output.write(format!("{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end).as_bytes())?;
                             } Some(data) => {
-                                output.write(format!("{}\t{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end, data).as_bytes());
+                                output.write(format!("{}\t{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end, data).as_bytes())?;
                             }
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
 
     fn chrom_list(&mut self) -> Vec<Chrom> {
         self.chrom_bpt.chrom_list(&mut self.reader)
     }
 
-    fn find_chrom(&mut self, chrom: &str) -> Result<Option<Chrom>, &'static str> {
+    fn find_chrom(&mut self, chrom: &str) -> Result<Option<Chrom>, Error> {
         self.chrom_bpt.find(chrom, &mut self.reader)
     }
 }
@@ -728,11 +744,8 @@ mod test_bb {
     use super::*;
 
     //TODO: add testcase for nonexistent file
-    fn bb_from_file(filename: &str) -> Result<BigBed<File>, &'static str> {
-        match File::open(filename) {
-            Err(msg) => Err("Static I/O error"),
-            Ok(reader) => BigBed::from_file(reader)
-        }
+    fn bb_from_file(filename: &str) -> Result<BigBed<File>, Error> {
+        BigBed::from_file(File::open(filename)?)
     }
 
     //test for file signatures
@@ -740,11 +753,15 @@ mod test_bb {
     fn from_file_not_bigbed() {
         // this produces a 'File I/O error because the file is empty (no bytes can be read)
         let result = bb_from_file("test/beds/empty.bed").unwrap_err();
-        assert_eq!(result, "File I/O error");
+        if let Error::IOError(x) = result {
+            // do a more manual check?
+        } else {
+            panic!("Expected IOError, received {:?}", result)
+        }
         let result = bb_from_file("test/beds/one.bed").unwrap_err();
-        assert_eq!(result, "This is not a bigbed file!");
+        assert_eq!(result, Error::BadSig{expected: BIGBED_SIG, received: [99, 104, 114, 55]});
         let result = bb_from_file("test/notbed.png").unwrap_err();
-        assert_eq!(result, "This is not a bigbed file!");
+        assert_eq!(result, Error::BadSig{expected: BIGBED_SIG, received: [137, 80, 78, 71]});
     }
 
     //test a bigbed made from a one-line bed file
@@ -936,7 +953,7 @@ mod test_bb {
          assert_eq!(bb.find_chrom("chr7").unwrap(), Some(Chrom{name: String::from("chr7"), id: 0, size: 159345973}));
          assert_eq!(bb.find_chrom("chr").unwrap(), None);
          // key too long
-         assert_eq!(bb.find_chrom("chr79"), Err("Key too long."));
+         assert_eq!(bb.find_chrom("chr79"), Err(Error::BadKey(String::from("chr79"), 4)));
          // should be case-sensitive
          assert_eq!(bb.find_chrom("cHr7").unwrap(), None);
          // near-matches don't count
@@ -952,7 +969,7 @@ mod test_bb {
         // cannot omit the 'chr'
         assert_eq!(bb.find_chrom("2").unwrap(), None);
         // still should have key too long errors
-        assert_eq!(bb.find_chrom("chr2xx"), Err("Key too long."));
+        assert_eq!(bb.find_chrom("chr2xx"), Err(Error::BadKey(String::from("chr2xx"), 5)));
     }
 
     #[test]
@@ -991,7 +1008,7 @@ fn main() {
                     bb.to_bed(None, None, None, None, output);
                 }
                 Err(msg) => {
-                    eprintln!("{}", msg);
+                    eprintln!("{:?}", msg);
                 }
             }
         }

@@ -628,7 +628,7 @@ impl<T: Read + Seek> BigBed<T> {
         Ok(lines)
     }
 
-    pub fn to_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>, mut output: impl Write) -> Result<(), Error> {
+    pub fn write_bed(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>, mut output: impl Write) -> Result<(), Error> {
         let item_count = 0;
         for chrom_data in self.chrom_list()? {
             //TODO: check for null characters
@@ -669,6 +669,51 @@ impl<T: Read + Seek> BigBed<T> {
         }
         Ok(())
     }
+
+    
+    pub fn to_string(&mut self, chrom: Option<&str>, start: Option<u32>, end: Option<u32>, max_items: Option<u32>) -> Result<Vec<String>, Error> {
+        //TODO: use the unzoomed circle to get an item count here
+        let mut output: Vec<String> = Vec::new();
+        let item_count = 0;
+        for chrom_data in self.chrom_list()? {
+            //TODO: check for null characters
+            if let Some(name) = chrom {
+                if name != strip_null(&chrom_data.name) {
+                    continue
+                }
+            }
+            let start = match start {
+                None => 0,
+                Some(value) => value,
+            };
+            let end = match end {
+                None => chrom_data.size,
+                Some(value) => value,
+            };
+            // check on the total number of items
+            let mut items_left = 0;
+            if let Some(max_value) = max_items {
+                items_left = max_value - item_count;
+                // stop iteration if we have exceeded the limit
+                if items_left <= 0 {
+                    break;
+                }
+            }
+
+            let name_to_print = strip_null(&chrom_data.name);
+            let interval_list = self.query(&chrom_data.name, start, end, items_left)?;
+            for bed_line in interval_list.into_iter() {
+                match bed_line.rest {
+                    None => {
+                        output.push(format!("{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end));
+                    } Some(data) => {
+                        output.push(format!("{}\t{}\t{}\t{}\n", name_to_print, bed_line.start, bed_line.end, data));
+                    }
+                }
+            }
+        }
+        Ok(output)
+    } 
 
     pub fn chrom_list(&mut self) -> Result<Vec<Chrom>, Error> {
         self.chrom_bpt.chrom_list(&mut self.reader)

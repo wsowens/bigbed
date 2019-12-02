@@ -69,7 +69,8 @@ fn main() {
             match result {
                 Ok(mut bigbed) => {
                     // attempt to convert BigBed to a BED using the provided parameters
-                    let result = bigbed.to_bed(chrom, None, None, None, output);
+                    eprintln!("{:#?}", bigbed);
+                    let result = bigbed.write_bed(chrom, None, None, None, output);
                     // handle any errors
                     if let Err(err) = result {
                         eprintln!("{}", err);

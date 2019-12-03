@@ -10,6 +10,24 @@ use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::process::exit;
 
+// a simple function that performs all the necessary error checking 
+// for the 32-bit unsigned flags: start, stop, max
+fn parse_u32_parameter(input: Option<&str>, flag: &str) -> Option<u32> {
+    match input {
+        None => None,
+        Some(value) => {
+            match value.parse::<u32>() {
+                Ok(num) => Some(num),
+                Err(msg) => {
+                    eprintln!("Invalid value for {}: '{}'", flag, value);
+                    eprintln!("(Expected a number between 0 and {})", u32::max_value());
+                    exit(1);
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     // create a simple command line parser
     let matches = App::new("rbb")
@@ -32,6 +50,24 @@ fn main() {
                 .takes_value(true)
                 .long("chr")
         )
+        .arg(
+            Arg::with_name("start")
+                .help("if set, restrict output to only that over start")
+                .takes_value(true)
+                .long("start")
+        )
+        .arg(
+            Arg::with_name("end")
+                .help("if set, restrict output to only that under end")
+                .takes_value(true)
+                .long("end")
+        )
+        .arg(
+            Arg::with_name("max_items")
+                .help("if set, restrict output to first N items (per chromosome)")
+                .takes_value(true)
+                .long("max")
+        )
         .get_matches();
     
     // determine if we should use stdout or create a new file
@@ -52,6 +88,9 @@ fn main() {
         }
     );
     let chrom = matches.value_of("chr");
+    let start = parse_u32_parameter(matches.value_of("start"), "--start");
+    let end = parse_u32_parameter(matches.value_of("end"), "--end");
+    let max_items = parse_u32_parameter(matches.value_of("max_items"), "--max");
 
     // this will always work, since input is required arg
     let filename = matches.value_of("input.bb").unwrap();
@@ -69,8 +108,7 @@ fn main() {
             match result {
                 Ok(mut bigbed) => {
                     // attempt to convert BigBed to a BED using the provided parameters
-                    eprintln!("{:#?}", bigbed);
-                    let result = bigbed.write_bed(chrom, None, None, None, output);
+                    let result = bigbed.write_bed(chrom, start, end, max_items, output);
                     // handle any errors
                     if let Err(err) = result {
                         eprintln!("{}", err);
